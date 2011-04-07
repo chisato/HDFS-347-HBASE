@@ -85,6 +85,8 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   final int writePacketSize;
   private final FileSystem.Statistics stats;
   private int maxBlockAcquireFailures;
+  private boolean shortCircuitLocalReads = false;
+  private final InetAddress localHost;
 
   /**
    * We assume we're talking to another CDH server, which supports
@@ -195,6 +197,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
     // dfs.write.packet.size is an internal config variable
     this.writePacketSize = conf.getInt("dfs.write.packet.size", 64*1024);
     this.maxBlockAcquireFailures = getMaxBlockAcquireFailures(conf);
+    this.localHost = InetAddress.getLocalHost();
     
     try {
       this.ugi = UnixUserGroupInformation.login(conf, true);
@@ -222,6 +225,8 @@ public class DFSClient implements FSConstants, java.io.Closeable {
           "Expecting exactly one of nameNodeAddr and rpcNamenode being null: "
           + "nameNodeAddr=" + nameNodeAddr + ", rpcNamenode=" + rpcNamenode);
     }
+    // read directly from the block file if configured.
+    this.shortCircuitLocalReads = conf.getBoolean("dfs.read.shortcircuit", true);
   }
 
   static int getMaxBlockAcquireFailures(Configuration conf) {
@@ -1188,7 +1193,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
       int nRead = super.read(buf, off, len);
       
       // if gotEOS was set in the previous read and checksum is enabled :
-      if (gotEOS && !eosBefore && nRead >= 0 && needChecksum()) {
+      if (dnSock != null && gotEOS && !eosBefore && nRead >= 0 && needChecksum()) {
         //checksum is verified and there are no errors.
         checksumOk(dnSock);
       }
@@ -1364,6 +1369,13 @@ public class DFSClient implements FSConstants, java.io.Closeable {
 
       bytesPerChecksum = this.checksum.getBytesPerChecksum();
       checksumSize = this.checksum.getChecksumSize();
+    }
+
+    /**  
+     * Public constructor 
+     */  
+    BlockReader(String file, int numRetries) { 
+      super(new Path(file), numRetries);
     }
 
     public static BlockReader newBlockReader(Socket sock, String file, long blockId, 
@@ -1708,11 +1720,35 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         chosenNode = retval.info;
         InetSocketAddress targetAddr = retval.addr;
 
+        // try reading the block locally. if this fails, then go via
+        // the datanode
+        Block blk = targetBlock.getBlock();
+        try {
+          if (LOG.isDebugEnabled()) {
+            LOG.warn("blockSeekTo shortCircuitLocalReads " + shortCircuitLocalReads +
+                     " localhost " + localHost +
+                     " targetAddr " + targetAddr);
+          }
+          if (shortCircuitLocalReads && localHost != null && 
+              (targetAddr.equals(localHost) ||
+               targetAddr.getHostName().startsWith("localhost"))) {
+            blockReader = BlockReaderLocal.newBlockReader(conf, src, blk,
+                                                   chosenNode,
+                                                   offsetIntoBlock, 
+                                                   blk.getNumBytes() - offsetIntoBlock);
+            return chosenNode;
+	  }
+        } catch (IOException ex) {
+          LOG.info("Failed to read block " + targetBlock.getBlock() +
+                   " on local machine " + localHost +
+                   ". Try via the datanode on " + targetAddr + ":" 
+                    + StringUtils.stringifyException(ex));
+        }
+
         try {
           s = socketFactory.createSocket();
           NetUtils.connect(s, targetAddr, socketTimeout);
           s.setSoTimeout(socketTimeout);
-          Block blk = targetBlock.getBlock();
           
           blockReader = BlockReader.newBlockReader(s, src, blk.getBlockId(), 
               blk.getGenerationStamp(),
@@ -1917,19 +1953,47 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         DatanodeInfo chosenNode = retval.info;
         InetSocketAddress targetAddr = retval.addr;
         BlockReader reader = null;
-            
+	      int len = (int) (end - start + 1);
+
         try {
-          dn = socketFactory.createSocket();
-          NetUtils.connect(dn, targetAddr, socketTimeout);
-          dn.setSoTimeout(socketTimeout);
+	        if (LOG.isDebugEnabled()) {
+	          LOG.debug("fetchBlockByteRange shortCircuitLocalReads " +
+		        shortCircuitLocalReads +
+		        " localhst " + localHost +
+		        " targetAddr " + targetAddr);
+	        }
+	        // first try reading the block locally.
+	        if (shortCircuitLocalReads && localHost != null &&
+	            (targetAddr.equals(localHost) ||
+	            targetAddr.getHostName().startsWith("localhost"))) {
+	          if (block.pathinfo == null) {
+	            reader = BlockReaderLocal.newBlockReader(conf, src,
+						     block.getBlock(),
+						     chosenNode,
+						     start,
+						     len);
+	            block.pathinfo = ((BlockReaderLocal)reader).pathinfo;
+	            System.out.println("fetchBlockByteRange non-reused");
+	          } else {
+	            //BlockPathInfo pathinfo = ((BlockReaderLocal)reader).pathinfo;
+	            BlockPathInfo pathinfo = block.pathinfo;
+	            reader = new BlockReaderLocal(conf, src, block.getBlock(),
+                  start, len,
+                  pathinfo);
+	            System.out.println("fetchBlockByteRange reused");
+	          }
+	        } else {
+	          // go to the datanode
+            dn = socketFactory.createSocket();
+            NetUtils.connect(dn, targetAddr, socketTimeout);
+            dn.setSoTimeout(socketTimeout);
               
-          int len = (int) (end - start + 1);
-              
-          reader = BlockReader.newBlockReader(dn, src, 
+            reader = BlockReader.newBlockReader(dn, src, 
                                               block.getBlock().getBlockId(),
                                               block.getBlock().getGenerationStamp(),
                                               start, len, buffersize, 
                                               verifyChecksum, clientName);
+	        }
           int nread = reader.readAll(buf, offset, len);
           if (nread != len) {
             throw new IOException("truncated return from reader.read(): " +
@@ -3043,7 +3107,8 @@ public class DFSClient implements FSConstants, java.io.Closeable {
 
       } catch (IOException ie) {
 
-        LOG.info("Exception in createBlockOutputStream " + ie);
+        LOG.info("Exception in createBlockOutputStream " + nodes[0].getName() + " " +
+                 ie);
 
         // find the datanode that matches
         if (firstBadLink.length() != 0) {

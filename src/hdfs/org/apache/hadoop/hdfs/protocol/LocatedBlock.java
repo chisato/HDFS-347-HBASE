@@ -43,6 +43,7 @@ public class LocatedBlock implements Writable {
   // else false. If block has few corrupt replicas, they are filtered and 
   // their locations are not part of this object
   private boolean corrupt;
+  public BlockPathInfo pathinfo;
 
   /**
    */
