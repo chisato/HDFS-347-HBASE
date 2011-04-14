@@ -42,6 +42,7 @@ import org.apache.hadoop.util.*;
 import org.apache.commons.logging.*;
 
 import java.io.*;
+import java.nio.channels.*;
 import java.net.*;
 import java.util.*;
 import java.util.zip.CRC32;
@@ -1482,7 +1483,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    * DFSInputStream provides bytes from a named file.  It handles 
    * negotiation of the namenode and various datanodes as necessary.
    ****************************************************************/
-  class DFSInputStream extends FSInputStream {
+  public class DFSInputStream extends FSInputStream {
     private Socket s = null;
     private boolean closed = false;
 
@@ -1495,7 +1496,37 @@ public class DFSClient implements FSConstants, java.io.Closeable {
     private Block currentBlock = null;
     private long pos = 0;
     private long blockEnd = -1;
-
+    //private FileChannel fileChannel;
+    //private RandomAccessFile randomAccessFile;
+    
+    public File getFile() throws IOException {
+      LocatedBlock locatedBlock = locatedBlocks.get(0);
+      DNAddrPair retval = chooseDataNode(locatedBlock);
+      DatanodeInfo chosenNode = retval.info;
+      InetSocketAddress targetAddr = retval.addr;
+      ClientDatanodeProtocol datanode = null;
+      if ((targetAddr.equals(localHost) ||
+        targetAddr.getHostName().startsWith("localhost"))) {
+        try {
+          datanode = DFSClient.createClientDatanodeProtocolProxy(chosenNode, conf);
+          Block block = locatedBlock.getBlock();
+          BlockPathInfo pathinfo = datanode.getBlockPathInfo(block);
+          return new File(pathinfo.getBlockPath());
+          //randomAccessFile = new RandomAccessFile(pathinfo.getBlockPath(), "r");
+          //System.out.println("created fileChannel:"+pathinfo.getBlockPath()+" length:"+randomAccessFile.length());
+        } finally {
+          if (datanode != null) {
+            RPC.stopProxy(datanode);
+          }
+        }
+      }
+      return null;
+    }
+    
+    //public RandomAccessFile getRAF() {
+    //  return randomAccessFile;
+    //}
+    
     /**
      * This variable tracks the number of failures since the start of the
      * most recent user-facing operation. That is to say, it should be reset
@@ -1786,7 +1817,9 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         blockReader.close();
         blockReader = null;
       }
-      
+      //if (randomAccessFile != null) {
+      //  randomAccessFile.close();
+      //}
       if (s != null) {
         s.close();
         s = null;
@@ -1973,14 +2006,14 @@ public class DFSClient implements FSConstants, java.io.Closeable {
 						     start,
 						     len);
 	            block.pathinfo = ((BlockReaderLocal)reader).pathinfo;
-	            System.out.println("fetchBlockByteRange non-reused");
+	            //System.out.println("fetchBlockByteRange non-reused");
 	          } else {
 	            //BlockPathInfo pathinfo = ((BlockReaderLocal)reader).pathinfo;
 	            BlockPathInfo pathinfo = block.pathinfo;
 	            reader = new BlockReaderLocal(conf, src, block.getBlock(),
                   start, len,
                   pathinfo);
-	            System.out.println("fetchBlockByteRange reused");
+	            //System.out.println("fetchBlockByteRange reused");
 	          }
 	        } else {
 	          // go to the datanode
@@ -2047,6 +2080,46 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         realLen = (int)(filelen - position);
       }
       
+      // as an optimization, if there is only 1 block
+      // then we cache the local file channel and read
+      // directly from it
+      /**
+      if (shortCircuitLocalReads && localHost != null) {
+      if (locatedBlocks.locatedBlockCount() == 1
+           && fileChannel == null) {
+        LocatedBlock locatedBlock = locatedBlocks.get(0);
+        DNAddrPair retval = chooseDataNode(locatedBlock);
+        DatanodeInfo chosenNode = retval.info;
+        InetSocketAddress targetAddr = retval.addr;
+        ClientDatanodeProtocol datanode = null;
+        if ((targetAddr.equals(localHost) ||
+            targetAddr.getHostName().startsWith("localhost"))) {
+        try {
+          datanode = DFSClient.createClientDatanodeProtocolProxy(chosenNode, conf);
+          Block block = locatedBlock.getBlock();
+          BlockPathInfo pathinfo = datanode.getBlockPathInfo(block);
+          randomAccessFile = new RandomAccessFile(pathinfo.getBlockPath(), "r");
+          fileChannel = randomAccessFile.getChannel();
+          System.out.println("created fileChannel:"+pathinfo.getBlockPath()+" length:"+randomAccessFile.length());
+        } finally {
+          if (datanode != null) {
+            RPC.stopProxy(datanode);
+          }
+        }
+        }
+      }
+      // nocommit: we need to validate this file is still
+      // available
+      if (fileChannel != null) {
+        ByteBuffer byteByffer = ByteBuffer.wrap(buffer, offset, length);
+        int numRead = fileChannel.read(byteByffer, position);
+        if (stats != null) {
+          stats.incrementBytesRead(realLen);
+        }
+        return numRead;
+      }
+      }
+      **/
       // determine the block and byte range within the block
       // corresponding to position and realLen
       List<LocatedBlock> blockRange = getBlockRange(position, realLen);

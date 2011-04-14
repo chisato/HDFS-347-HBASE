@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.protocol;
 import org.apache.hadoop.io.*;
 
 import java.io.*;
+import java.nio.channels.*;
 
 /****************************************************
  * A LocatedBlock is a pair of Block, DatanodeInfo[]
@@ -44,7 +45,6 @@ public class LocatedBlock implements Writable {
   // their locations are not part of this object
   private boolean corrupt;
   public BlockPathInfo pathinfo;
-
   /**
    */
   public LocatedBlock() {

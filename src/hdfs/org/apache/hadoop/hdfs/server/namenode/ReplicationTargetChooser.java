@@ -403,12 +403,13 @@ class ReplicationTargetChooser {
 
     long remaining = node.getRemaining() - 
                      (node.getBlocksScheduled() * blockSize); 
+    // nocommit: There's probably a way around this
     // check the remaining capacity of the target machine
-    if (blockSize* FSConstants.MIN_BLOCKS_FOR_WRITE>remaining) {
-      logr.debug("Node "+NodeBase.getPath(node)+
-                " is not chosen because the node does not have enough space");
-      return false;
-    }
+    //if (blockSize* FSConstants.MIN_BLOCKS_FOR_WRITE>remaining) {
+    //  logr.debug("Node "+NodeBase.getPath(node)+
+    //            " is not chosen because the node does not have enough space");
+    //  return false;
+    //}
       
     // check the communication traffic of the target machine
     if (considerLoad) {

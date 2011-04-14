@@ -33,6 +33,10 @@ public class FSDataInputStream extends DataInputStream
     }
   }
   
+  public InputStream getInput() {
+    return in;
+  }
+  
   public synchronized void seek(long desired) throws IOException {
     ((Seekable)in).seek(desired);
   }
